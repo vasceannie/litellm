@@ -33,6 +33,7 @@ from litellm.types.llms.openai import (
     ChatCompletionAssistantToolCall,
     ChatCompletionFunctionMessage,
     ChatCompletionImageObject,
+    ChatCompletionImageUrlObject,
     ChatCompletionTextObject,
     ChatCompletionToolCallFunctionChunk,
     ChatCompletionToolMessage,
@@ -257,43 +258,6 @@ def mistral_instruct_pt(messages):
         messages=messages,
     )
     return prompt
-
-
-def mistral_api_pt(messages):
-    """
-    - handles scenario where content is list and not string
-    - content list is just text, and no images
-    - if image passed in, then just return as is (user-intended)
-
-    Motivation: mistral api doesn't support content as a list
-    """
-    new_messages = []
-    for m in messages:
-        special_keys = ["role", "content", "tool_calls", "function_call"]
-        extra_args = {}
-        if isinstance(m, dict):
-            for k, v in m.items():
-                if k not in special_keys:
-                    extra_args[k] = v
-        texts = ""
-        if m.get("content", None) is not None and isinstance(m["content"], list):
-            for c in m["content"]:
-                if c["type"] == "image_url":
-                    return messages
-                elif c["type"] == "text" and isinstance(c["text"], str):
-                    texts += c["text"]
-        elif m.get("content", None) is not None and isinstance(m["content"], str):
-            texts = m["content"]
-
-        new_m = {"role": m["role"], "content": texts, **extra_args}
-
-        if new_m["role"] == "tool" and m.get("name"):
-            new_m["name"] = m["name"]
-        if m.get("tool_calls"):
-            new_m["tool_calls"] = m["tool_calls"]
-
-        new_messages.append(new_m)
-    return new_messages
 
 
 # Falcon prompt template - from https://github.com/lm-sys/FastChat/blob/main/fastchat/conversation.py#L110
@@ -718,6 +682,27 @@ def construct_tool_use_system_prompt(
     return tool_use_system_prompt
 
 
+def convert_generic_image_chunk_to_openai_image_obj(
+    image_chunk: GenericImageParsingChunk,
+) -> str:
+    """
+    Convert a generic image chunk to an OpenAI image object.
+
+    Input:
+    GenericImageParsingChunk(
+        type="base64",
+        media_type="image/jpeg",
+        data="...",
+    )
+
+    Return:
+    "data:image/jpeg;base64,{base64_image}"
+    """
+    return "data:{};{},{}".format(
+        image_chunk["media_type"], image_chunk["type"], image_chunk["data"]
+    )
+
+
 def convert_to_anthropic_image_obj(openai_image_url: str) -> GenericImageParsingChunk:
     """
     Input:
@@ -743,6 +728,7 @@ def convert_to_anthropic_image_obj(openai_image_url: str) -> GenericImageParsing
             data=base64_data,
         )
     except Exception as e:
+        traceback.print_exc()
         if "Error: Unable to fetch image from URL" in str(e):
             raise e
         raise Exception(
@@ -980,17 +966,10 @@ def _gemini_tool_call_invoke_helper(
     name = function_call_params.get("name", "") or ""
     arguments = function_call_params.get("arguments", "")
     arguments_dict = json.loads(arguments)
-    function_call: Optional[litellm.types.llms.vertex_ai.FunctionCall] = None
-    for k, v in arguments_dict.items():
-        inferred_protocol_value = infer_protocol_value(value=v)
-        _field = litellm.types.llms.vertex_ai.Field(
-            key=k, value={inferred_protocol_value: v}
-        )
-        _fields = litellm.types.llms.vertex_ai.FunctionCallArgs(fields=_field)
-        function_call = litellm.types.llms.vertex_ai.FunctionCall(
-            name=name,
-            args=_fields,
-        )
+    function_call = litellm.types.llms.vertex_ai.FunctionCall(
+        name=name,
+        args=arguments_dict,
+    )
     return function_call
 
 
@@ -1015,54 +994,26 @@ def convert_to_gemini_tool_call_invoke(
     },
     """
     """
-    Gemini tool call invokes: - https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling#submit-api-output
-    content {
-        role: "model"
-        parts [
+    Gemini tool call invokes:
+    {
+      "role": "model",
+      "parts": [
         {
-            function_call {
-            name: "get_current_weather"
-            args {
-                fields {
-                    key: "unit"
-                    value {
-                    string_value: "fahrenheit"
-                    }
-                }
-                fields {
-                    key: "predicted_temperature"
-                    value {
-                    number_value: 45
-                    }
-                }
-                fields {
-                    key: "location"
-                    value {
-                    string_value: "Boston, MA"
-                    }
-                }
+          "functionCall": {
+            "name": "get_current_weather",
+            "args": {
+              "unit": "fahrenheit",
+              "predicted_temperature": 45,
+              "location": "Boston, MA",
             }
-        },
-        {
-            function_call {
-            name: "get_current_weather"
-            args {
-                fields {
-                key: "location"
-                value {
-                    string_value: "San Francisco"
-                }
-                }
-            }
-            }
+          }
         }
-        ]
+      ]
     }
     """
 
     """
-    - json.load the arguments 
-    - iterate through arguments -> create a FunctionCallArgs for each field
+    - json.load the arguments
     """
     try:
         _parts_list: List[litellm.types.llms.vertex_ai.PartType] = []
@@ -1165,16 +1116,8 @@ def convert_to_gemini_tool_call_result(
 
     # We can't determine from openai message format whether it's a successful or
     # error call result so default to the successful result template
-    inferred_content_value = infer_protocol_value(value=content_str)
-
-    _field = litellm.types.llms.vertex_ai.Field(
-        key="content", value={inferred_content_value: content_str}
-    )
-
-    _function_call_args = litellm.types.llms.vertex_ai.FunctionCallArgs(fields=_field)
-
     _function_response = litellm.types.llms.vertex_ai.FunctionResponse(
-        name=name, response=_function_call_args  # type: ignore
+        name=name, response={"content": content_str}  # type: ignore
     )
 
     _part = litellm.types.llms.vertex_ai.PartType(function_response=_function_response)
@@ -1216,15 +1159,44 @@ def convert_to_anthropic_tool_result(
         ]
     }
     """
-    content_str: str = ""
+    anthropic_content: Union[
+        str,
+        List[Union[AnthropicMessagesToolResultContent, AnthropicMessagesImageParam]],
+    ] = ""
     if isinstance(message["content"], str):
-        content_str = message["content"]
+        anthropic_content = message["content"]
     elif isinstance(message["content"], List):
         content_list = message["content"]
+        anthropic_content_list: List[
+            Union[AnthropicMessagesToolResultContent, AnthropicMessagesImageParam]
+        ] = []
         for content in content_list:
             if content["type"] == "text":
-                content_str += content["text"]
+                anthropic_content_list.append(
+                    AnthropicMessagesToolResultContent(
+                        type="text",
+                        text=content["text"],
+                    )
+                )
+            elif content["type"] == "image_url":
+                if isinstance(content["image_url"], str):
+                    image_chunk = convert_to_anthropic_image_obj(content["image_url"])
+                else:
+                    image_chunk = convert_to_anthropic_image_obj(
+                        content["image_url"]["url"]
+                    )
+                anthropic_content_list.append(
+                    AnthropicMessagesImageParam(
+                        type="image",
+                        source=AnthropicContentParamSource(
+                            type="base64",
+                            media_type=image_chunk["media_type"],
+                            data=image_chunk["data"],
+                        ),
+                    )
+                )
 
+        anthropic_content = anthropic_content_list
     anthropic_tool_result: Optional[AnthropicMessagesToolResultParam] = None
     ## PROMPT CACHING CHECK ##
     cache_control = message.get("cache_control", None)
@@ -1235,14 +1207,14 @@ def convert_to_anthropic_tool_result(
         # We can't determine from openai message format whether it's a successful or
         # error call result so default to the successful result template
         anthropic_tool_result = AnthropicMessagesToolResultParam(
-            type="tool_result", tool_use_id=tool_call_id, content=content_str
+            type="tool_result", tool_use_id=tool_call_id, content=anthropic_content
         )
 
     if message["role"] == "function":
         function_message: ChatCompletionFunctionMessage = message
         tool_call_id = function_message.get("tool_call_id") or str(uuid.uuid4())
         anthropic_tool_result = AnthropicMessagesToolResultParam(
-            type="tool_result", tool_use_id=tool_call_id, content=content_str
+            type="tool_result", tool_use_id=tool_call_id, content=anthropic_content
         )
 
     if anthropic_tool_result is None:
@@ -1330,7 +1302,10 @@ def convert_to_anthropic_tool_invoke(
 
 def add_cache_control_to_content(
     anthropic_content_element: Union[
-        dict, AnthropicMessagesImageParam, AnthropicMessagesTextParam
+        dict,
+        AnthropicMessagesImageParam,
+        AnthropicMessagesTextParam,
+        AnthropicMessagesDocumentParam,
     ],
     orignal_content_element: Union[dict, AllMessageValues],
 ):
@@ -1341,6 +1316,32 @@ def add_cache_control_to_content(
         anthropic_content_element["cache_control"] = transformed_param
 
     return anthropic_content_element
+
+
+def _anthropic_content_element_factory(
+    image_chunk: GenericImageParsingChunk,
+) -> Union[AnthropicMessagesImageParam, AnthropicMessagesDocumentParam]:
+    if image_chunk["media_type"] == "application/pdf":
+        _anthropic_content_element: Union[
+            AnthropicMessagesDocumentParam, AnthropicMessagesImageParam
+        ] = AnthropicMessagesDocumentParam(
+            type="document",
+            source=AnthropicContentParamSource(
+                type="base64",
+                media_type=image_chunk["media_type"],
+                data=image_chunk["data"],
+            ),
+        )
+    else:
+        _anthropic_content_element = AnthropicMessagesImageParam(
+            type="image",
+            source=AnthropicContentParamSource(
+                type="base64",
+                media_type=image_chunk["media_type"],
+                data=image_chunk["data"],
+            ),
+        )
+    return _anthropic_content_element
 
 
 def anthropic_messages_pt(  # noqa: PLR0915
@@ -1400,15 +1401,9 @@ def anthropic_messages_pt(  # noqa: PLR0915
                                     openai_image_url=m["image_url"]["url"]
                                 )
 
-                            _anthropic_content_element = AnthropicMessagesImageParam(
-                                type="image",
-                                source=AnthropicImageParamSource(
-                                    type="base64",
-                                    media_type=image_chunk["media_type"],
-                                    data=image_chunk["data"],
-                                ),
+                            _anthropic_content_element = (
+                                _anthropic_content_element_factory(image_chunk)
                             )
-
                             _content_element = add_cache_control_to_content(
                                 anthropic_content_element=_anthropic_content_element,
                                 orignal_content_element=dict(m),
@@ -2830,7 +2825,7 @@ def prompt_factory(
         else:
             return gemini_text_image_pt(messages=messages)
     elif custom_llm_provider == "mistral":
-        return mistral_api_pt(messages=messages)
+        return litellm.MistralConfig._transform_messages(messages=messages)
     elif custom_llm_provider == "bedrock":
         if "amazon.titan-text" in model:
             return amazon_titan_pt(messages=messages)

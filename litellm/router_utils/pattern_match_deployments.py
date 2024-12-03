@@ -61,7 +61,27 @@ class PatternMatchRouter:
         # return f"^{regex}$"
         return re.escape(pattern).replace(r"\*", "(.*)")
 
-    def route(self, request: Optional[str]) -> Optional[List[Dict]]:
+    def _return_pattern_matched_deployments(
+        self, matched_pattern: Match, deployments: List[Dict]
+    ) -> List[Dict]:
+        new_deployments = []
+        for deployment in deployments:
+            new_deployment = copy.deepcopy(deployment)
+            new_deployment["litellm_params"]["model"] = (
+                PatternMatchRouter.set_deployment_model_name(
+                    matched_pattern=matched_pattern,
+                    litellm_deployment_litellm_model=deployment["litellm_params"][
+                        "model"
+                    ],
+                )
+            )
+            new_deployments.append(new_deployment)
+
+        return new_deployments
+
+    def route(
+        self, request: Optional[str], filtered_model_names: Optional[List[str]] = None
+    ) -> Optional[List[Dict]]:
         """
         Route a requested model to the corresponding llm deployments based on the regex pattern
 
@@ -71,16 +91,31 @@ class PatternMatchRouter:
 
         Args:
             request: Optional[str]
-
+            filtered_model_names: Optional[List[str]] - if provided, only return deployments that match the filtered_model_names
         Returns:
             Optional[List[Deployment]]: llm deployments
         """
         try:
             if request is None:
                 return None
+
+            regex_filtered_model_names = (
+                [self._pattern_to_regex(m) for m in filtered_model_names]
+                if filtered_model_names is not None
+                else []
+            )
+
             for pattern, llm_deployments in self.patterns.items():
-                if re.match(pattern, request):
-                    return llm_deployments
+                if (
+                    filtered_model_names is not None
+                    and pattern not in regex_filtered_model_names
+                ):
+                    continue
+                pattern_match = re.match(pattern, request)
+                if pattern_match:
+                    return self._return_pattern_matched_deployments(
+                        matched_pattern=pattern_match, deployments=llm_deployments
+                    )
         except Exception as e:
             verbose_router_logger.debug(f"Error in PatternMatchRouter.route: {str(e)}")
 
@@ -96,12 +131,28 @@ class PatternMatchRouter:
 
         E.g.:
 
+        Case 1:
         model_name: llmengine/* (can be any regex pattern or wildcard pattern)
         litellm_params:
             model: openai/*
 
         if model_name = "llmengine/foo" -> model = "openai/foo"
+
+        Case 2:
+        model_name: llmengine/fo::*::static::*
+        litellm_params:
+            model: openai/fo::*::static::*
+
+        if model_name = "llmengine/foo::bar::static::baz" -> model = "openai/foo::bar::static::baz"
+
+        Case 3:
+        model_name: *meta.llama3*
+        litellm_params:
+            model: bedrock/meta.llama3*
+
+        if model_name = "hello-world-meta.llama3-70b" -> model = "bedrock/meta.llama3-70b"
         """
+
         ## BASE CASE: if the deployment model name does not contain a wildcard, return the deployment model name
         if "*" not in litellm_deployment_litellm_model:
             return litellm_deployment_litellm_model
@@ -112,10 +163,9 @@ class PatternMatchRouter:
         dynamic_segments = matched_pattern.groups()
 
         if len(dynamic_segments) > wildcard_count:
-            raise ValueError(
-                f"More wildcards in the deployment model name than the pattern. Wildcard count: {wildcard_count}, dynamic segments count: {len(dynamic_segments)}"
-            )
-
+            return (
+                matched_pattern.string
+            )  # default to the user input, if unable to map based on wildcards.
         # Replace the corresponding wildcards in the litellm model pattern with extracted segments
         for segment in dynamic_segments:
             litellm_deployment_litellm_model = litellm_deployment_litellm_model.replace(
@@ -165,12 +215,7 @@ class PatternMatchRouter:
         """
         pattern_match = self.get_pattern(model, custom_llm_provider)
         if pattern_match:
-            provider_deployments = []
-            for deployment in pattern_match:
-                dep = copy.deepcopy(deployment)
-                dep["litellm_params"]["model"] = model
-                provider_deployments.append(dep)
-            return provider_deployments
+            return pattern_match
         return []
 
 

@@ -15,8 +15,10 @@ from pydantic import BaseModel
 from typing_extensions import overload, override
 
 import litellm
+from litellm import LlmProviders
 from litellm._logging import verbose_logger
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
+from litellm.llms.custom_httpx.http_handler import _DEFAULT_TTL_FOR_HTTPX_CLIENTS
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.utils import ProviderField
 from litellm.utils import (
@@ -24,6 +26,7 @@ from litellm.utils import (
     CustomStreamWrapper,
     Message,
     ModelResponse,
+    ProviderConfigManager,
     TextCompletionResponse,
     Usage,
     convert_to_model_response_object,
@@ -560,8 +563,9 @@ class OpenAIChatCompletion(BaseLLM):
 
             _cache_key = f"hashed_api_key={hashed_api_key},api_base={api_base},timeout={timeout},max_retries={max_retries},organization={organization},is_async={is_async}"
 
-            if _cache_key in litellm.in_memory_llm_clients_cache:
-                return litellm.in_memory_llm_clients_cache[_cache_key]
+            _cached_client = litellm.in_memory_llm_clients_cache.get_cache(_cache_key)
+            if _cached_client:
+                return _cached_client
             if is_async:
                 _new_client: Union[OpenAI, AsyncOpenAI] = AsyncOpenAI(
                     api_key=api_key,
@@ -582,7 +586,11 @@ class OpenAIChatCompletion(BaseLLM):
                 )
 
             ## SAVE CACHE KEY
-            litellm.in_memory_llm_clients_cache[_cache_key] = _new_client
+            litellm.in_memory_llm_clients_cache.set_cache(
+                key=_cache_key,
+                value=_new_client,
+                ttl=_DEFAULT_TTL_FOR_HTTPX_CLIENTS,
+            )
             return _new_client
 
         else:
@@ -701,13 +709,11 @@ class OpenAIChatCompletion(BaseLLM):
                         messages=messages,
                         custom_llm_provider=custom_llm_provider,
                     )
-            if (
-                litellm.openAIO1Config.is_model_o1_reasoning_model(model=model)
-                and messages is not None
-            ):
-                messages = litellm.openAIO1Config.o1_prompt_factory(
-                    messages=messages,
+            if messages is not None and custom_llm_provider is not None:
+                provider_config = ProviderConfigManager.get_provider_config(
+                    model=model, provider=LlmProviders(custom_llm_provider)
                 )
+                messages = provider_config._transform_messages(messages)
 
             for _ in range(
                 2

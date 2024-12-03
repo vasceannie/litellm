@@ -51,6 +51,9 @@ from ..common_utils import (
 
 
 def _process_gemini_image(image_url: str) -> PartType:
+    """
+    Given an image URL, return the appropriate PartType for Gemini
+    """
     try:
         # GCS URIs
         if "gs://" in image_url:
@@ -68,15 +71,47 @@ def _process_gemini_image(image_url: str) -> PartType:
             file_data = FileDataType(mime_type=mime_type, file_uri=image_url)
 
             return PartType(file_data=file_data)
-
-        # Direct links
-        elif "https:/" in image_url or "base64" in image_url:
+        elif (
+            "https://" in image_url
+            and (image_type := _get_image_mime_type_from_url(image_url)) is not None
+        ):
+            file_data = FileDataType(file_uri=image_url, mime_type=image_type)
+            return PartType(file_data=file_data)
+        elif "https://" in image_url or "base64" in image_url:
+            # https links for unsupported mime types and base64 images
             image = convert_to_anthropic_image_obj(image_url)
             _blob = BlobType(data=image["data"], mime_type=image["media_type"])
             return PartType(inline_data=_blob)
         raise Exception("Invalid image received - {}".format(image_url))
     except Exception as e:
         raise e
+
+
+def _get_image_mime_type_from_url(url: str) -> Optional[str]:
+    """
+    Get mime type for common image URLs
+    See gemini mime types: https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/image-understanding#image-requirements
+
+    Supported by Gemini:
+     - PNG (`image/png`)
+     - JPEG (`image/jpeg`)
+     - WebP (`image/webp`)
+    Example:
+        url = https://example.com/image.jpg
+        Returns: image/jpeg
+    """
+    url = url.lower()
+    if url.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    elif url.endswith(".png"):
+        return "image/png"
+    elif url.endswith(".webp"):
+        return "image/webp"
+    elif url.endswith(".mp4"):
+        return "video/mp4"
+    elif url.endswith(".pdf"):
+        return "application/pdf"
+    return None
 
 
 def _gemini_convert_messages_with_history(  # noqa: PLR0915
@@ -263,7 +298,12 @@ def _transform_request_body(
     optional_params = {k: v for k, v in optional_params.items() if k not in remove_keys}
 
     try:
-        content = _gemini_convert_messages_with_history(messages=messages)
+        if custom_llm_provider == "gemini":
+            content = litellm.GoogleAIStudioGeminiConfig._transform_messages(
+                messages=messages
+            )
+        else:
+            content = litellm.VertexGeminiConfig._transform_messages(messages=messages)
         tools: Optional[Tools] = optional_params.pop("tools", None)
         tool_choice: Optional[ToolConfig] = optional_params.pop("tool_choice", None)
         safety_settings: Optional[List[SafetSettingsConfig]] = optional_params.pop(

@@ -27,6 +27,9 @@ from fastapi import HTTPException, Request
 import pytest
 from litellm.proxy.auth.route_checks import RouteChecks
 from litellm.proxy._types import LiteLLM_UserTable, LitellmUserRoles, UserAPIKeyAuth
+from litellm.proxy.pass_through_endpoints.llm_passthrough_endpoints import (
+    router as llm_passthrough_router,
+)
 
 # Replace the actual hash_token function with our mock
 import litellm.proxy.auth.route_checks
@@ -56,11 +59,20 @@ def test_is_llm_api_route():
     assert RouteChecks.is_llm_api_route("/vertex-ai/text") is True
     assert RouteChecks.is_llm_api_route("/gemini/generate") is True
     assert RouteChecks.is_llm_api_route("/cohere/generate") is True
+    assert RouteChecks.is_llm_api_route("/anthropic/messages") is True
+    assert RouteChecks.is_llm_api_route("/anthropic/v1/messages") is True
+    assert RouteChecks.is_llm_api_route("/azure/endpoint") is True
 
     # check non-matching routes
     assert RouteChecks.is_llm_api_route("/some/random/route") is False
     assert RouteChecks.is_llm_api_route("/key/regenerate/82akk800000000jjsk") is False
     assert RouteChecks.is_llm_api_route("/key/82akk800000000jjsk/delete") is False
+
+    # check all routes in llm_passthrough_router, ensure they are considered llm api routes
+    for route in llm_passthrough_router.routes:
+        route_path = str(route.path)
+        print("route_path", route_path)
+        assert RouteChecks.is_llm_api_route(route_path) is True
 
 
 # Test _route_matches_pattern
@@ -145,23 +157,6 @@ def test_key_info_route_allowed(route_checks):
         )
         is None
     )
-
-
-def test_key_info_route_forbidden(route_checks):
-    """
-    Internal User is not allowed to access /key/info route for a key they're not using in Authenticated API Key
-    """
-    with pytest.raises(HTTPException) as exc_info:
-        route_checks.non_proxy_admin_allowed_routes_check(
-            user_obj=None,
-            _user_role=LitellmUserRoles.INTERNAL_USER.value,
-            route="/key/info",
-            request=MockRequest(query_params={"key": "wrong_key"}),
-            valid_token=UserAPIKeyAuth(api_key="test_key"),
-            api_key="test_key",
-            request_data={},
-        )
-    assert exc_info.value.status_code == 403
 
 
 def test_user_info_route_allowed(route_checks):

@@ -106,6 +106,8 @@ class ModelInfo(TypedDict, total=False):
     supports_prompt_caching: Optional[bool]
     supports_audio_input: Optional[bool]
     supports_audio_output: Optional[bool]
+    tpm: Optional[int]
+    rpm: Optional[int]
 
 
 class GenericStreamingChunk(TypedDict, total=False):
@@ -745,12 +747,12 @@ class StreamingChatCompletionChunk(OpenAIChatCompletionChunk):
         super().__init__(**kwargs)
 
 
-class ModelResponse(OpenAIObject):
+from openai.types.chat import ChatCompletionChunk
+
+
+class ModelResponseBase(OpenAIObject):
     id: str
     """A unique identifier for the completion."""
-
-    choices: List[Union[Choices, StreamingChoices]]
-    """The list of completion choices the model generated for the input prompt."""
 
     created: int
     """The Unix timestamp (in seconds) of when the completion was created."""
@@ -771,6 +773,55 @@ class ModelResponse(OpenAIObject):
     _hidden_params: dict = {}
 
     _response_headers: Optional[dict] = None
+
+
+class ModelResponseStream(ModelResponseBase):
+    choices: List[StreamingChoices]
+
+    def __init__(
+        self,
+        choices: Optional[List[Union[StreamingChoices, dict, BaseModel]]] = None,
+        **kwargs,
+    ):
+        if choices is not None and isinstance(choices, list):
+            new_choices = []
+            for choice in choices:
+                _new_choice = None
+                if isinstance(choice, StreamingChoices):
+                    _new_choice = choice
+                elif isinstance(choice, dict):
+                    _new_choice = StreamingChoices(**choice)
+                elif isinstance(choice, BaseModel):
+                    _new_choice = StreamingChoices(**choice.model_dump())
+                new_choices.append(_new_choice)
+            kwargs["choices"] = new_choices
+        else:
+            kwargs["choices"] = [StreamingChoices()]
+        super().__init__(**kwargs)
+
+    def __contains__(self, key):
+        # Define custom behavior for the 'in' operator
+        return hasattr(self, key)
+
+    def get(self, key, default=None):
+        # Custom .get() method to access attributes with a default value if the attribute doesn't exist
+        return getattr(self, key, default)
+
+    def __getitem__(self, key):
+        # Allow dictionary-style access to attributes
+        return getattr(self, key)
+
+    def json(self, **kwargs):  # type: ignore
+        try:
+            return self.model_dump()  # noqa
+        except Exception:
+            # if using pydantic v1
+            return self.dict()
+
+
+class ModelResponse(ModelResponseBase):
+    choices: List[Union[Choices, StreamingChoices]]
+    """The list of completion choices the model generated for the input prompt."""
 
     def __init__(
         self,
@@ -1145,7 +1196,7 @@ class ImageObject(OpenAIImage):
     url: Optional[str] = None
     revised_prompt: Optional[str] = None
 
-    def __init__(self, b64_json=None, url=None, revised_prompt=None):
+    def __init__(self, b64_json=None, url=None, revised_prompt=None, **kwargs):
         super().__init__(b64_json=b64_json, url=url, revised_prompt=revised_prompt)  # type: ignore
 
     def __contains__(self, key):
@@ -1273,11 +1324,6 @@ class TranscriptionResponse(OpenAIObject):
 
 
 class GenericImageParsingChunk(TypedDict):
-    # {
-    #         "type": "base64",
-    #         "media_type": f"image/{image_format}",
-    #         "data": base64_data,
-    #     }
     type: str
     media_type: str
     data: str
@@ -1290,6 +1336,7 @@ class ResponseFormatChunk(TypedDict, total=False):
 
 all_litellm_params = [
     "metadata",
+    "litellm_trace_id",
     "tags",
     "acompletion",
     "aimg_generation",
@@ -1479,6 +1526,7 @@ StandardLoggingPayloadStatus = Literal["success", "failure"]
 
 class StandardLoggingPayload(TypedDict):
     id: str
+    trace_id: str  # Trace multiple LLM calls belonging to same overall request (e.g. fallbacks/retries)
     call_type: str
     response_cost: float
     response_cost_failure_debug_info: Optional[
@@ -1551,3 +1599,27 @@ class StandardCallbackDynamicParams(TypedDict, total=False):
     # GCS dynamic params
     gcs_bucket_name: Optional[str]
     gcs_path_service_account: Optional[str]
+
+    # Langsmith dynamic params
+    langsmith_api_key: Optional[str]
+    langsmith_project: Optional[str]
+    langsmith_base_url: Optional[str]
+
+
+class KeyGenerationConfig(TypedDict, total=False):
+    required_params: List[
+        str
+    ]  # specify params that must be present in the key generation request
+
+
+class TeamUIKeyGenerationConfig(KeyGenerationConfig):
+    allowed_team_member_roles: List[str]
+
+
+class PersonalUIKeyGenerationConfig(KeyGenerationConfig):
+    allowed_user_roles: List[str]
+
+
+class StandardKeyGenerationConfig(TypedDict, total=False):
+    team_key_generation: TeamUIKeyGenerationConfig
+    personal_key_generation: PersonalUIKeyGenerationConfig

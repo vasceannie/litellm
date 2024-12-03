@@ -41,6 +41,7 @@ from typing import (
 import httpx
 import openai
 from openai import AsyncOpenAI
+from pydantic import BaseModel
 from typing_extensions import overload
 
 import litellm
@@ -59,6 +60,7 @@ from litellm.router_strategy.lowest_cost import LowestCostLoggingHandler
 from litellm.router_strategy.lowest_latency import LowestLatencyLoggingHandler
 from litellm.router_strategy.lowest_tpm_rpm import LowestTPMLoggingHandler
 from litellm.router_strategy.lowest_tpm_rpm_v2 import LowestTPMLoggingHandler_v2
+from litellm.router_strategy.provider_budgets import ProviderBudgetLimiting
 from litellm.router_strategy.simple_shuffle import simple_shuffle
 from litellm.router_strategy.tag_based_routing import get_deployments_for_tag
 from litellm.router_utils.batch_utils import (
@@ -119,7 +121,9 @@ from litellm.types.router import (
     LiteLLMParamsTypedDict,
     ModelGroupInfo,
     ModelInfo,
+    ProviderBudgetConfigType,
     RetryPolicy,
+    RouterCacheEnum,
     RouterErrors,
     RouterGeneralSettings,
     RouterModelGroupAliasItem,
@@ -235,8 +239,8 @@ class Router:
             "cost-based-routing",
             "usage-based-routing-v2",
         ] = "simple-shuffle",
-        routing_strategy_args: dict = {},  # just for latency-based routing
-        semaphore: Optional[asyncio.Semaphore] = None,
+        routing_strategy_args: dict = {},  # just for latency-based
+        provider_budget_config: Optional[ProviderBudgetConfigType] = None,
         alerting_config: Optional[AlertingConfig] = None,
         router_general_settings: Optional[
             RouterGeneralSettings
@@ -272,6 +276,7 @@ class Router:
             routing_strategy (Literal["simple-shuffle", "least-busy", "usage-based-routing", "latency-based-routing", "cost-based-routing"]): Routing strategy. Defaults to "simple-shuffle".
             routing_strategy_args (dict): Additional args for latency-based routing. Defaults to {}.
             alerting_config (AlertingConfig): Slack alerting configuration. Defaults to None.
+            provider_budget_config (ProviderBudgetConfig): Provider budget configuration. Use this to set llm_provider budget limits. example $100/day to OpenAI, $100/day to Azure, etc. Defaults to None.
         Returns:
             Router: An instance of the litellm.Router class.
 
@@ -311,8 +316,6 @@ class Router:
 
         from litellm._service_logger import ServiceLogging
 
-        if semaphore:
-            self.semaphore = semaphore
         self.set_verbose = set_verbose
         self.debug_level = debug_level
         self.enable_pre_call_checks = enable_pre_call_checks
@@ -339,11 +342,7 @@ class Router:
         cache_config: Dict[str, Any] = {}
 
         self.client_ttl = client_ttl
-        if redis_url is not None or (
-            redis_host is not None
-            and redis_port is not None
-            and redis_password is not None
-        ):
+        if redis_url is not None or (redis_host is not None and redis_port is not None):
             cache_type = "redis"
 
             if redis_url is not None:
@@ -506,6 +505,14 @@ class Router:
             litellm.success_callback.append(self.sync_deployment_callback_on_success)
         else:
             litellm.success_callback = [self.sync_deployment_callback_on_success]
+        if isinstance(litellm._async_failure_callback, list):
+            litellm._async_failure_callback.append(
+                self.async_deployment_callback_on_failure
+            )
+        else:
+            litellm._async_failure_callback = [
+                self.async_deployment_callback_on_failure
+            ]
         ## COOLDOWNS ##
         if isinstance(litellm.failure_callback, list):
             litellm.failure_callback.append(self.deployment_callback_on_failure)
@@ -521,6 +528,12 @@ class Router:
         )
         self.service_logger_obj = ServiceLogging()
         self.routing_strategy_args = routing_strategy_args
+        self.provider_budget_config = provider_budget_config
+        if self.provider_budget_config is not None:
+            self.provider_budget_logger = ProviderBudgetLimiting(
+                router_cache=self.cache,
+                provider_budget_config=self.provider_budget_config,
+            )
         self.retry_policy: Optional[RetryPolicy] = None
         if retry_policy is not None:
             if isinstance(retry_policy, dict):
@@ -556,6 +569,10 @@ class Router:
 
         self.initialize_assistants_endpoint()
 
+        self.amoderation = self.factory_function(
+            litellm.amoderation, call_type="moderation"
+        )
+
     def initialize_assistants_endpoint(self):
         ## INITIALIZE PASS THROUGH ASSISTANTS ENDPOINT ##
         self.acreate_assistants = self.factory_function(litellm.acreate_assistants)
@@ -585,6 +602,7 @@ class Router:
     def routing_strategy_init(
         self, routing_strategy: Union[RoutingStrategy, str], routing_strategy_args: dict
     ):
+        verbose_router_logger.info(f"Routing strategy: {routing_strategy}")
         if (
             routing_strategy == RoutingStrategy.LEAST_BUSY.value
             or routing_strategy == RoutingStrategy.LEAST_BUSY
@@ -678,9 +696,8 @@ class Router:
             kwargs["model"] = model
             kwargs["messages"] = messages
             kwargs["original_function"] = self._completion
-            kwargs.get("request_timeout", self.timeout)
-            kwargs["num_retries"] = kwargs.get("num_retries", self.num_retries)
-            kwargs.setdefault("metadata", {}).update({"model_group": model})
+            self._update_kwargs_before_fallbacks(model=model, kwargs=kwargs)
+
             response = self.function_with_fallbacks(**kwargs)
             return response
         except Exception as e:
@@ -782,8 +799,7 @@ class Router:
             kwargs["stream"] = stream
             kwargs["original_function"] = self._acompletion
             kwargs["num_retries"] = kwargs.get("num_retries", self.num_retries)
-
-            kwargs.setdefault("metadata", {}).update({"model_group": model})
+            self._update_kwargs_before_fallbacks(model=model, kwargs=kwargs)
 
             request_priority = kwargs.get("priority") or self.default_priority
 
@@ -912,6 +928,7 @@ class Router:
                     logging_obj=logging_obj,
                     parent_otel_span=parent_otel_span,
                 )
+
                 response = await _response
 
             ## CHECK CONTENT FILTER ERROR ##
@@ -945,6 +962,17 @@ class Router:
             if model_name is not None:
                 self.fail_calls[model_name] += 1
             raise e
+
+    def _update_kwargs_before_fallbacks(self, model: str, kwargs: dict) -> None:
+        """
+        Adds/updates to kwargs:
+        - num_retries
+        - litellm_trace_id
+        - metadata
+        """
+        kwargs["num_retries"] = kwargs.get("num_retries", self.num_retries)
+        kwargs.setdefault("litellm_trace_id", str(uuid.uuid4()))
+        kwargs.setdefault("metadata", {}).update({"model_group": model})
 
     def _update_kwargs_with_default_litellm_params(self, kwargs: dict) -> None:
         """
@@ -1509,9 +1537,7 @@ class Router:
             kwargs["model"] = model
             kwargs["file"] = file
             kwargs["original_function"] = self._atranscription
-            kwargs["num_retries"] = kwargs.get("num_retries", self.num_retries)
-            kwargs.get("request_timeout", self.timeout)
-            kwargs.setdefault("metadata", {}).update({"model_group": model})
+            self._update_kwargs_before_fallbacks(model=model, kwargs=kwargs)
             response = await self.async_function_with_fallbacks(**kwargs)
 
             return response
@@ -1681,86 +1707,12 @@ class Router:
             )
             raise e
 
-    async def amoderation(self, model: str, input: str, **kwargs):
-        try:
-            kwargs["model"] = model
-            kwargs["input"] = input
-            kwargs["original_function"] = self._amoderation
-            kwargs["num_retries"] = kwargs.get("num_retries", self.num_retries)
-            kwargs.get("request_timeout", self.timeout)
-            kwargs.setdefault("metadata", {}).update({"model_group": model})
-
-            response = await self.async_function_with_fallbacks(**kwargs)
-
-            return response
-        except Exception as e:
-            asyncio.create_task(
-                send_llm_exception_alert(
-                    litellm_router_instance=self,
-                    request_kwargs=kwargs,
-                    error_traceback_str=traceback.format_exc(),
-                    original_exception=e,
-                )
-            )
-            raise e
-
-    async def _amoderation(self, model: str, input: str, **kwargs):
-        model_name = None
-        try:
-            verbose_router_logger.debug(
-                f"Inside _moderation()- model: {model}; kwargs: {kwargs}"
-            )
-            deployment = await self.async_get_available_deployment(
-                model=model,
-                input=input,
-                specific_deployment=kwargs.pop("specific_deployment", None),
-            )
-            self._update_kwargs_with_deployment(deployment=deployment, kwargs=kwargs)
-            data = deployment["litellm_params"].copy()
-            model_name = data["model"]
-            model_client = self._get_async_openai_model_client(
-                deployment=deployment,
-                kwargs=kwargs,
-            )
-            self.total_calls[model_name] += 1
-
-            timeout: Optional[Union[float, int]] = self._get_timeout(
-                kwargs=kwargs,
-                data=data,
-            )
-
-            response = await litellm.amoderation(
-                **{
-                    **data,
-                    "input": input,
-                    "caching": self.cache_responses,
-                    "client": model_client,
-                    "timeout": timeout,
-                    **kwargs,
-                }
-            )
-
-            self.success_calls[model_name] += 1
-            verbose_router_logger.info(
-                f"litellm.amoderation(model={model_name})\033[32m 200 OK\033[0m"
-            )
-            return response
-        except Exception as e:
-            verbose_router_logger.info(
-                f"litellm.amoderation(model={model_name})\033[31m Exception {str(e)}\033[0m"
-            )
-            if model_name is not None:
-                self.fail_calls[model_name] += 1
-            raise e
-
     async def arerank(self, model: str, **kwargs):
         try:
             kwargs["model"] = model
             kwargs["input"] = input
             kwargs["original_function"] = self._arerank
-            kwargs["num_retries"] = kwargs.get("num_retries", self.num_retries)
-            kwargs.get("request_timeout", self.timeout)
-            kwargs.setdefault("metadata", {}).update({"model_group": model})
+            self._update_kwargs_before_fallbacks(model=model, kwargs=kwargs)
 
             response = await self.async_function_with_fallbacks(**kwargs)
 
@@ -1909,9 +1861,7 @@ class Router:
             kwargs["model"] = model
             kwargs["prompt"] = prompt
             kwargs["original_function"] = self._atext_completion
-            kwargs["num_retries"] = kwargs.get("num_retries", self.num_retries)
-            kwargs.get("request_timeout", self.timeout)
-            kwargs.setdefault("metadata", {}).update({"model_group": model})
+            self._update_kwargs_before_fallbacks(model=model, kwargs=kwargs)
             response = await self.async_function_with_fallbacks(**kwargs)
 
             return response
@@ -2182,9 +2132,7 @@ class Router:
             kwargs["model"] = model
             kwargs["input"] = input
             kwargs["original_function"] = self._aembedding
-            kwargs["num_retries"] = kwargs.get("num_retries", self.num_retries)
-            kwargs.get("request_timeout", self.timeout)
-            kwargs.setdefault("metadata", {}).update({"model_group": model})
+            self._update_kwargs_before_fallbacks(model=model, kwargs=kwargs)
             response = await self.async_function_with_fallbacks(**kwargs)
             return response
         except Exception as e:
@@ -2608,20 +2556,43 @@ class Router:
 
         return final_results
 
-    #### ASSISTANTS API ####
+    #### PASSTHROUGH API ####
 
-    def factory_function(self, original_function: Callable):
+    async def _pass_through_moderation_endpoint_factory(
+        self,
+        original_function: Callable,
+        **kwargs,
+    ):
+        if kwargs.get("model") and self.get_model_list(model_name=kwargs["model"]):
+            deployment = await self.async_get_available_deployment(
+                model=kwargs["model"]
+            )
+            kwargs["model"] = deployment["litellm_params"]["model"]
+        return await original_function(**kwargs)
+
+    def factory_function(
+        self,
+        original_function: Callable,
+        call_type: Literal["assistants", "moderation"] = "assistants",
+    ):
         async def new_function(
             custom_llm_provider: Optional[Literal["openai", "azure"]] = None,
             client: Optional["AsyncOpenAI"] = None,
             **kwargs,
         ):
-            return await self._pass_through_assistants_endpoint_factory(
-                original_function=original_function,
-                custom_llm_provider=custom_llm_provider,
-                client=client,
-                **kwargs,
-            )
+            if call_type == "assistants":
+                return await self._pass_through_assistants_endpoint_factory(
+                    original_function=original_function,
+                    custom_llm_provider=custom_llm_provider,
+                    client=client,
+                    **kwargs,
+                )
+            elif call_type == "moderation":
+
+                return await self._pass_through_moderation_endpoint_factory(  # type: ignore
+                    original_function=original_function,
+                    **kwargs,
+                )
 
         return new_function
 
@@ -2653,6 +2624,7 @@ class Router:
         If it fails after num_retries, fall back to another model group
         """
         model_group: Optional[str] = kwargs.get("model")
+        disable_fallbacks: Optional[bool] = kwargs.pop("disable_fallbacks", False)
         fallbacks: Optional[List] = kwargs.get("fallbacks", self.fallbacks)
         context_window_fallbacks: Optional[List] = kwargs.get(
             "context_window_fallbacks", self.context_window_fallbacks
@@ -2660,6 +2632,7 @@ class Router:
         content_policy_fallbacks: Optional[List] = kwargs.get(
             "content_policy_fallbacks", self.content_policy_fallbacks
         )
+
         try:
             self._handle_mock_testing_fallbacks(
                 kwargs=kwargs,
@@ -2679,7 +2652,7 @@ class Router:
             original_model_group: Optional[str] = kwargs.get("model")  # type: ignore
             fallback_failure_exception_str = ""
 
-            if original_model_group is None:
+            if disable_fallbacks is True or original_model_group is None:
                 raise e
 
             input_kwargs = {
@@ -2961,14 +2934,14 @@ class Router:
                 raise
 
             # decides how long to sleep before retry
-            _timeout = self._time_to_sleep_before_retry(
+            retry_after = self._time_to_sleep_before_retry(
                 e=original_exception,
                 remaining_retries=num_retries,
                 num_retries=num_retries,
                 healthy_deployments=_healthy_deployments,
             )
-            # sleeps for the length of the timeout
-            await asyncio.sleep(_timeout)
+
+            await asyncio.sleep(retry_after)
             for current_attempt in range(num_retries):
                 try:
                     # if the function call is successful, no exception will be raised and we'll break out of the loop
@@ -3322,13 +3295,14 @@ class Router:
     ):
         """
         Track remaining tpm/rpm quota for model in model_list
-
-        Currently, only updates TPM usage.
         """
         try:
             if kwargs["litellm_params"].get("metadata") is None:
                 pass
             else:
+                deployment_name = kwargs["litellm_params"]["metadata"].get(
+                    "deployment", None
+                )  # stable name - works for wildcard routes as well
                 model_group = kwargs["litellm_params"]["metadata"].get(
                     "model_group", None
                 )
@@ -3338,6 +3312,8 @@ class Router:
                     return
                 elif isinstance(id, int):
                     id = str(id)
+
+                parent_otel_span = _get_parent_otel_span_from_kwargs(kwargs)
 
                 _usage_obj = completion_response.get("usage")
                 total_tokens = _usage_obj.get("total_tokens", 0) if _usage_obj else 0
@@ -3350,17 +3326,29 @@ class Router:
                     "%H-%M"
                 )  # use the same timezone regardless of system clock
 
-                tpm_key = f"global_router:{id}:tpm:{current_minute}"
+                tpm_key = RouterCacheEnum.TPM.value.format(
+                    id=id, current_minute=current_minute, model=deployment_name
+                )
                 # ------------
                 # Update usage
                 # ------------
                 # update cache
 
-                parent_otel_span = _get_parent_otel_span_from_kwargs(kwargs)
                 ## TPM
                 await self.cache.async_increment_cache(
                     key=tpm_key,
                     value=total_tokens,
+                    parent_otel_span=parent_otel_span,
+                    ttl=RoutingArgs.ttl.value,
+                )
+
+                ## RPM
+                rpm_key = RouterCacheEnum.RPM.value.format(
+                    id=id, current_minute=current_minute, model=deployment_name
+                )
+                await self.cache.async_increment_cache(
+                    key=rpm_key,
+                    value=1,
                     parent_otel_span=parent_otel_span,
                     ttl=RoutingArgs.ttl.value,
                 )
@@ -3476,6 +3464,40 @@ class Router:
 
         except Exception as e:
             raise e
+
+    async def async_deployment_callback_on_failure(
+        self, kwargs, completion_response: Optional[Any], start_time, end_time
+    ):
+        """
+        Update RPM usage for a deployment
+        """
+        deployment_name = kwargs["litellm_params"]["metadata"].get(
+            "deployment", None
+        )  # handles wildcard routes - by giving the original name sent to `litellm.completion`
+        model_group = kwargs["litellm_params"]["metadata"].get("model_group", None)
+        model_info = kwargs["litellm_params"].get("model_info", {}) or {}
+        id = model_info.get("id", None)
+        if model_group is None or id is None:
+            return
+        elif isinstance(id, int):
+            id = str(id)
+        parent_otel_span = _get_parent_otel_span_from_kwargs(kwargs)
+
+        dt = get_utc_datetime()
+        current_minute = dt.strftime(
+            "%H-%M"
+        )  # use the same timezone regardless of system clock
+
+        ## RPM
+        rpm_key = RouterCacheEnum.RPM.value.format(
+            id=id, current_minute=current_minute, model=deployment_name
+        )
+        await self.cache.async_increment_cache(
+            key=rpm_key,
+            value=1,
+            parent_otel_span=parent_otel_span,
+            ttl=RoutingArgs.ttl.value,
+        )
 
     def log_retry(self, kwargs: dict, e: Exception) -> dict:
         """
@@ -3598,6 +3620,15 @@ class Router:
             # Catch all - if any exceptions default to cooling down
             return True
 
+    def _has_default_fallbacks(self) -> bool:
+        if self.fallbacks is None:
+            return False
+        for fallback in self.fallbacks:
+            if isinstance(fallback, dict):
+                if "*" in fallback:
+                    return True
+        return False
+
     def _should_raise_content_policy_error(
         self, model: str, response: ModelResponse, kwargs: dict
     ) -> bool:
@@ -3614,6 +3645,7 @@ class Router:
         content_policy_fallbacks = kwargs.get(
             "content_policy_fallbacks", self.content_policy_fallbacks
         )
+
         ### ONLY RAISE ERROR IF CP FALLBACK AVAILABLE ###
         if content_policy_fallbacks is not None:
             fallback_model_group = None
@@ -3624,6 +3656,8 @@ class Router:
 
             if fallback_model_group is not None:
                 return True
+        elif self._has_default_fallbacks():  # default fallbacks set
+            return True
 
         verbose_router_logger.info(
             "Content Policy Error occurred. No available fallbacks. Returning original response. model={}, content_policy_fallbacks={}".format(
@@ -4142,7 +4176,24 @@ class Router:
                     raise Exception("Model Name invalid - {}".format(type(model)))
         return None
 
-    def get_router_model_info(self, deployment: dict) -> ModelMapInfo:
+    @overload
+    def get_router_model_info(
+        self, deployment: dict, received_model_name: str, id: None = None
+    ) -> ModelMapInfo:
+        pass
+
+    @overload
+    def get_router_model_info(
+        self, deployment: None, received_model_name: str, id: str
+    ) -> ModelMapInfo:
+        pass
+
+    def get_router_model_info(
+        self,
+        deployment: Optional[dict],
+        received_model_name: str,
+        id: Optional[str] = None,
+    ) -> ModelMapInfo:
         """
         For a given model id, return the model info (max tokens, input cost, output cost, etc.).
 
@@ -4156,6 +4207,14 @@ class Router:
         Raises:
         - ValueError -> If model is not mapped yet
         """
+        if id is not None:
+            _deployment = self.get_deployment(model_id=id)
+            if _deployment is not None:
+                deployment = _deployment.model_dump(exclude_none=True)
+
+        if deployment is None:
+            raise ValueError("Deployment not found")
+
         ## GET BASE MODEL
         base_model = deployment.get("model_info", {}).get("base_model", None)
         if base_model is None:
@@ -4177,8 +4236,27 @@ class Router:
         elif custom_llm_provider != "azure":
             model = _model
 
+            potential_models = self.pattern_router.route(received_model_name)
+            if "*" in model and potential_models is not None:  # if wildcard route
+                for potential_model in potential_models:
+                    try:
+                        if potential_model.get("model_info", {}).get(
+                            "id"
+                        ) == deployment.get("model_info", {}).get("id"):
+                            model = potential_model.get("litellm_params", {}).get(
+                                "model"
+                            )
+                            break
+                    except Exception:
+                        pass
+
         ## GET LITELLM MODEL INFO - raises exception, if model is not mapped
-        model_info = litellm.get_model_info(model=model)
+        if not model.startswith(custom_llm_provider):
+            model_info_name = "{}/{}".format(custom_llm_provider, model)
+        else:
+            model_info_name = model
+
+        model_info = litellm.get_model_info(model=model_info_name)
 
         ## CHECK USER SET MODEL INFO
         user_model_info = deployment.get("model_info", {})
@@ -4228,8 +4306,10 @@ class Router:
         total_tpm: Optional[int] = None
         total_rpm: Optional[int] = None
         configurable_clientside_auth_params: CONFIGURABLE_CLIENTSIDE_AUTH_PARAMS = None
-
-        for model in self.model_list:
+        model_list = self.get_model_list(model_name=model_group)
+        if model_list is None:
+            return None
+        for model in model_list:
             is_match = False
             if (
                 "model_name" in model and model["model_name"] == model_group
@@ -4244,7 +4324,7 @@ class Router:
             if not is_match:
                 continue
             # model in model group found #
-            litellm_params = LiteLLM_Params(**model["litellm_params"])
+            litellm_params = LiteLLM_Params(**model["litellm_params"])  # type: ignore
             # get configurable clientside auth params
             configurable_clientside_auth_params = (
                 litellm_params.configurable_clientside_auth_params
@@ -4252,38 +4332,30 @@ class Router:
             # get model tpm
             _deployment_tpm: Optional[int] = None
             if _deployment_tpm is None:
-                _deployment_tpm = model.get("tpm", None)
+                _deployment_tpm = model.get("tpm", None)  # type: ignore
             if _deployment_tpm is None:
-                _deployment_tpm = model.get("litellm_params", {}).get("tpm", None)
+                _deployment_tpm = model.get("litellm_params", {}).get("tpm", None)  # type: ignore
             if _deployment_tpm is None:
-                _deployment_tpm = model.get("model_info", {}).get("tpm", None)
+                _deployment_tpm = model.get("model_info", {}).get("tpm", None)  # type: ignore
 
-            if _deployment_tpm is not None:
-                if total_tpm is None:
-                    total_tpm = 0
-                total_tpm += _deployment_tpm  # type: ignore
             # get model rpm
             _deployment_rpm: Optional[int] = None
             if _deployment_rpm is None:
-                _deployment_rpm = model.get("rpm", None)
+                _deployment_rpm = model.get("rpm", None)  # type: ignore
             if _deployment_rpm is None:
-                _deployment_rpm = model.get("litellm_params", {}).get("rpm", None)
+                _deployment_rpm = model.get("litellm_params", {}).get("rpm", None)  # type: ignore
             if _deployment_rpm is None:
-                _deployment_rpm = model.get("model_info", {}).get("rpm", None)
+                _deployment_rpm = model.get("model_info", {}).get("rpm", None)  # type: ignore
 
-            if _deployment_rpm is not None:
-                if total_rpm is None:
-                    total_rpm = 0
-                total_rpm += _deployment_rpm  # type: ignore
             # get model info
             try:
                 model_info = litellm.get_model_info(model=litellm_params.model)
             except Exception:
                 model_info = None
             # get llm provider
-            model, llm_provider = "", ""
+            litellm_model, llm_provider = "", ""
             try:
-                model, llm_provider, _, _ = litellm.get_llm_provider(
+                litellm_model, llm_provider, _, _ = litellm.get_llm_provider(
                     model=litellm_params.model,
                     custom_llm_provider=litellm_params.custom_llm_provider,
                 )
@@ -4294,7 +4366,7 @@ class Router:
 
             if model_info is None:
                 supported_openai_params = litellm.get_supported_openai_params(
-                    model=model, custom_llm_provider=llm_provider
+                    model=litellm_model, custom_llm_provider=llm_provider
                 )
                 if supported_openai_params is None:
                     supported_openai_params = []
@@ -4384,7 +4456,20 @@ class Router:
                     model_group_info.supported_openai_params = model_info[
                         "supported_openai_params"
                     ]
+                if model_info.get("tpm", None) is not None and _deployment_tpm is None:
+                    _deployment_tpm = model_info.get("tpm")
+                if model_info.get("rpm", None) is not None and _deployment_rpm is None:
+                    _deployment_rpm = model_info.get("rpm")
 
+            if _deployment_tpm is not None:
+                if total_tpm is None:
+                    total_tpm = 0
+                total_tpm += _deployment_tpm  # type: ignore
+
+            if _deployment_rpm is not None:
+                if total_rpm is None:
+                    total_rpm = 0
+                total_rpm += _deployment_rpm  # type: ignore
         if model_group_info is not None:
             ## UPDATE WITH TOTAL TPM/RPM FOR MODEL GROUP
             if total_tpm is not None:
@@ -4436,7 +4521,10 @@ class Router:
         self, model_group: str
     ) -> Tuple[Optional[int], Optional[int]]:
         """
-        Returns remaining tpm/rpm quota for model group
+        Returns current tpm/rpm usage for model group
+
+        Parameters:
+        - model_group: str - the received model name from the user (can be a wildcard route).
 
         Returns:
         - usage: Tuple[tpm, rpm]
@@ -4447,20 +4535,37 @@ class Router:
         )  # use the same timezone regardless of system clock
         tpm_keys: List[str] = []
         rpm_keys: List[str] = []
-        for model in self.model_list:
-            if "model_name" in model and model["model_name"] == model_group:
-                tpm_keys.append(
-                    f"global_router:{model['model_info']['id']}:tpm:{current_minute}"
+
+        model_list = self.get_model_list(model_name=model_group)
+        if model_list is None:  # no matching deployments
+            return None, None
+
+        for model in model_list:
+            id: Optional[str] = model.get("model_info", {}).get("id")  # type: ignore
+            litellm_model: Optional[str] = model["litellm_params"].get(
+                "model"
+            )  # USE THE MODEL SENT TO litellm.completion() - consistent with how global_router cache is written.
+            if id is None or litellm_model is None:
+                continue
+            tpm_keys.append(
+                RouterCacheEnum.TPM.value.format(
+                    id=id,
+                    model=litellm_model,
+                    current_minute=current_minute,
                 )
-                rpm_keys.append(
-                    f"global_router:{model['model_info']['id']}:rpm:{current_minute}"
+            )
+            rpm_keys.append(
+                RouterCacheEnum.RPM.value.format(
+                    id=id,
+                    model=litellm_model,
+                    current_minute=current_minute,
                 )
+            )
         combined_tpm_rpm_keys = tpm_keys + rpm_keys
 
         combined_tpm_rpm_values = await self.cache.async_batch_get_cache(
             keys=combined_tpm_rpm_keys
         )
-
         if combined_tpm_rpm_values is None:
             return None, None
 
@@ -4485,6 +4590,32 @@ class Router:
                     rpm_usage += t
         return tpm_usage, rpm_usage
 
+    async def get_remaining_model_group_usage(self, model_group: str) -> Dict[str, int]:
+
+        current_tpm, current_rpm = await self.get_model_group_usage(model_group)
+
+        model_group_info = self.get_model_group_info(model_group)
+
+        if model_group_info is not None and model_group_info.tpm is not None:
+            tpm_limit = model_group_info.tpm
+        else:
+            tpm_limit = None
+
+        if model_group_info is not None and model_group_info.rpm is not None:
+            rpm_limit = model_group_info.rpm
+        else:
+            rpm_limit = None
+
+        returned_dict = {}
+        if tpm_limit is not None and current_tpm is not None:
+            returned_dict["x-ratelimit-remaining-tokens"] = tpm_limit - current_tpm
+            returned_dict["x-ratelimit-limit-tokens"] = tpm_limit
+        if rpm_limit is not None and current_rpm is not None:
+            returned_dict["x-ratelimit-remaining-requests"] = rpm_limit - current_rpm
+            returned_dict["x-ratelimit-limit-requests"] = rpm_limit
+
+        return returned_dict
+
     async def set_response_headers(
         self, response: Any, model_group: Optional[str] = None
     ) -> Any:
@@ -4495,6 +4626,30 @@ class Router:
         # - if healthy_deployments > 1, return model group rate limit headers
         # - else return the model's rate limit headers
         """
+        if (
+            isinstance(response, BaseModel)
+            and hasattr(response, "_hidden_params")
+            and isinstance(response._hidden_params, dict)  # type: ignore
+        ):
+            response._hidden_params.setdefault("additional_headers", {})  # type: ignore
+            response._hidden_params["additional_headers"][  # type: ignore
+                "x-litellm-model-group"
+            ] = model_group
+
+            additional_headers = response._hidden_params["additional_headers"]  # type: ignore
+
+            if (
+                "x-ratelimit-remaining-tokens" not in additional_headers
+                and "x-ratelimit-remaining-requests" not in additional_headers
+                and model_group is not None
+            ):
+                remaining_usage = await self.get_remaining_model_group_usage(
+                    model_group
+                )
+
+                for header, value in remaining_usage.items():
+                    if value is not None:
+                        additional_headers[header] = value
         return response
 
     def get_model_ids(self, model_name: Optional[str] = None) -> List[str]:
@@ -4557,6 +4712,9 @@ class Router:
         if hasattr(self, "model_list"):
             returned_models: List[DeploymentTypedDict] = []
 
+            if model_name is not None:
+                returned_models.extend(self._get_all_deployments(model_name=model_name))
+
             if hasattr(self, "model_group_alias"):
                 for model_alias, model_value in self.model_group_alias.items():
 
@@ -4577,21 +4735,32 @@ class Router:
                         )
                     )
 
+            if len(returned_models) == 0:  # check if wildcard route
+                potential_wildcard_models = self.pattern_router.route(model_name)
+                if potential_wildcard_models is not None:
+                    returned_models.extend(
+                        [DeploymentTypedDict(**m) for m in potential_wildcard_models]  # type: ignore
+                    )
+
             if model_name is None:
                 returned_models += self.model_list
 
                 return returned_models
-            returned_models.extend(self._get_all_deployments(model_name=model_name))
+
             return returned_models
         return None
 
-    def get_model_access_groups(self):
+    def get_model_access_groups(self, model_name: Optional[str] = None):
+        """
+        If model_name is provided, only return access groups for that model.
+        """
         from collections import defaultdict
 
         access_groups = defaultdict(list)
 
-        if self.model_list:
-            for m in self.model_list:
+        model_list = self.get_model_list(model_name=model_name)
+        if model_list:
+            for m in model_list:
                 for group in m.get("model_info", {}).get("access_groups", []):
                     model_name = m["model_name"]
                     access_groups[group].append(model_name)
@@ -4827,10 +4996,12 @@ class Router:
                     base_model = deployment.get("litellm_params", {}).get(
                         "base_model", None
                     )
+                model_info = self.get_router_model_info(
+                    deployment=deployment, received_model_name=model
+                )
                 model = base_model or deployment.get("litellm_params", {}).get(
                     "model", None
                 )
-                model_info = self.get_router_model_info(deployment=deployment)
 
                 if (
                     isinstance(model_info, dict)
@@ -4849,7 +5020,7 @@ class Router:
                         )
                         continue
             except Exception as e:
-                verbose_router_logger.error("An error occurs - {}".format(str(e)))
+                verbose_router_logger.exception("An error occurs - {}".format(str(e)))
 
             _litellm_params = deployment.get("litellm_params", {})
             model_id = deployment.get("model_info", {}).get("id", "")
@@ -5048,10 +5219,12 @@ class Router:
         )
 
         if len(healthy_deployments) == 0:
-            raise ValueError(
-                "{}. You passed in model={}. There is no 'model_name' with this string ".format(
-                    RouterErrors.no_deployments_available.value, model
-                )
+            raise litellm.BadRequestError(
+                message="You passed in model={}. There is no 'model_name' with this string ".format(
+                    model
+                ),
+                model=model,
+                llm_provider="",
             )
 
         if litellm.model_alias_map and model in litellm.model_alias_map:
@@ -5133,6 +5306,14 @@ class Router:
                 request_kwargs=request_kwargs,
                 healthy_deployments=healthy_deployments,
             )
+
+            if self.provider_budget_config is not None:
+                healthy_deployments = (
+                    await self.provider_budget_logger.async_filter_deployments(
+                        healthy_deployments=healthy_deployments,
+                        request_kwargs=request_kwargs,
+                    )
+                )
 
             if len(healthy_deployments) == 0:
                 exception = await async_raise_no_deployment_exception(
