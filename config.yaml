@@ -1,0 +1,128 @@
+# ------------------------------
+# LiteLLM Configuration
+# ------------------------------
+model_list:
+  - model_name: llama3.2-vision
+    litellm_params:
+      model: ollama/llama3.2-vision
+      gpu: true
+      max_tokens: 4096
+      description: "Vision-based tasks or multimodal capabilities."
+
+  - model_name: qwen2.5-coder-3b
+    litellm_params:
+      model: ollama/qwen2.5-coder:3b
+      gpu: true
+      max_tokens: 2048
+      description: "Lightweight coding model for quick tasks."
+
+  - model_name: qwen2.5-coder-7b
+    litellm_params:
+      model: ollama/qwen2.5-coder:7b
+      gpu: true
+      max_tokens: 4096
+      description: "Medium-sized coder for general-purpose development."
+
+  - model_name: qwen2.5-coder-14b
+    litellm_params:
+      model: ollama/qwen2.5-coder:14b
+      gpu: true
+      max_tokens: 8192
+      description: "High-end coding model for intensive development tasks."
+
+  - model_name: llama3.2-instruct-q4_K_M
+    litellm_params:
+      model: ollama/llama3.2:instruct-q4_K_M
+      gpu: false
+      max_tokens: 2048
+      description: "Lightweight instruction-tuned model for general-purpose tasks."
+
+  - model_name: mistral
+    litellm_params:
+      model: ollama/mistral
+      gpu: true
+      max_tokens: 4096
+      description: "Mistral optimized for language tasks requiring high accuracy."
+
+  - model_name: mistral-nemo
+    litellm_params:
+      model: ollama/mistral-nemo
+      gpu: true
+      max_tokens: 8192
+      description: "Mistral optimized for language tasks requiring high accuracy."
+
+  - model_name: nemotron-mini
+    litellm_params:
+      model: ollama/nemotron-mini
+      gpu: true
+      max_tokens: 2048
+    description: "Compact model for small-scale or edge-based applications."
+
+  - model_name: qwen2.5-coder-latest
+    litellm_params:
+      model: ollama/qwen2.5-coder:latest
+      gpu: true
+      max_tokens: 4096
+      description: "General-purpose coding assistant."
+
+  - model_name: ollama/codegemma
+    litellm_params:
+      model: ollama/codegemma
+      gpu: true
+      max_tokens: 4096
+      description: "Specialized model for code-related tasks."
+
+  - model_name: deepseek-coder
+    litellm_params:
+      model: ollama/deepseek-coder
+      gpu: false
+      max_tokens: 1024
+      description: "Lightweight model for searching and generating small code snippets."
+
+  - model_name: llama3.2
+    litellm_params:
+      model: ollama/llama3.2
+      gpu: true
+      max_tokens: 2048
+      description: "Standard LLaMA model for general-purpose LLM tasks."
+
+  - model_name: qwen2.5-coder-14b-studio
+    litellm_params:
+      model: lm_studio/qwen2.5-coder:14b
+      gpu: true
+      max_tokens: 8192
+      description: "Studio model for advanced language tasks."
+
+  - model_name: mxbai-embed-large
+    litellm_params:
+      model: ollama/mxbai-embed-large
+      mode: embedding
+
+
+default:
+  model: qwen2.5-coder:latest
+  max_tokens: 4096
+  gpu: true
+
+orchestration:
+  max_concurrent_requests: 8
+  timeout: 180
+  resource_allocation:
+    gpu_allocation_strategy: "gpu_max"
+    cpu_allocation_strategy: "fair"
+    memory_reservation: "20GB"
+  logging:
+    level: info
+    output: logs/litellm.log
+    rotation: daily
+    max_size: "100MB"
+
+litellm_settings:
+  drop_params: True
+  num_retries: 5
+  request_timeout: 600
+  telemetry: True
+  health_check_interval: 60
+
+general_settings:
+  master_key: ${LITELLM_MASTER_KEY}
