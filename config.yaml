@@ -2,127 +2,136 @@
 # LiteLLM Configuration
 # ------------------------------
 model_list:
-  - model_name: llama3.2-vision
+  # Perplexity Models
+  - model_name: llama-3.1-sonar-small-128k-online
     litellm_params:
-      model: ollama/llama3.2-vision
-      gpu: true
-      max_tokens: 4096
-      description: "Vision-based tasks or multimodal capabilities."
+      model: perplexity/llama-3.1-sonar-small-128k-online
+      api_key: os.environ/PERPLEXITY_API_KEY
+    model_info:
+      mode: completion
 
-  - model_name: qwen2.5-coder-3b
+  - model_name: llama-3.1-sonar-large-128k-online
     litellm_params:
-      model: ollama/qwen2.5-coder:3b
-      gpu: true
-      max_tokens: 2048
-      description: "Lightweight coding model for quick tasks."
+      model: perplexity/llama-3.1-sonar-large-128k-online
+      api_key: os.environ/PERPLEXITY_API_KEY
+    model_info:
+      mode: completion
 
-  - model_name: qwen2.5-coder-7b
+  - model_name: llama-3.1-sonar-huge-128k-online
     litellm_params:
-      model: ollama/qwen2.5-coder:7b
-      gpu: true
-      max_tokens: 4096
-      description: "Medium-sized coder for general-purpose development."
+      model: perplexity/llama-3.1-sonar-huge-128k-online
+      api_key: os.environ/PERPLEXITY_API_KEY
+    model_info:
+      mode: completion
+
+  # LM Studio Models
+  - model_name: phind-codellama-34b-v2
+    litellm_params:
+      model: lm_studio/phind-codellama-34b-v2
+      api_key: os.environ/LM_STUDIO_API_KEY
+      context_length: 8192
+      timeout: 120
+      health_check: false
+
+  - model_name: granite-3.0-8b
+    litellm_params:
+      model: lm_studio/granite-3.0-8b
+      api_key: os.environ/LM_STUDIO_API_KEY
+      context_length: 16384
+      timeout: 120
+      
+  - model_name: yi-coder-9b
+    litellm_params:
+      model: lm_studio/yi-coder-9b
+      api_key: os.environ/LM_STUDIO_API_KEY
+      context_length: 16384
+
+  - model_name: llama-3.2-11b-vision
+    litellm_params:
+      model: lm_studio/llama-3.2-11b-vision
+      api_key: os.environ/LM_STUDIO_API_KEY
+      context_length: 8192
 
   - model_name: qwen2.5-coder-14b
     litellm_params:
-      model: ollama/qwen2.5-coder:14b
-      gpu: true
-      max_tokens: 8192
-      description: "High-end coding model for intensive development tasks."
+      model: lm_studio/qwen2.5-coder-14b
+      api_key: os.environ/LM_STUDIO_API_KEY
+      context_length: 8192
 
-  - model_name: llama3.2-instruct-q4_K_M
+  - model_name: qwen2.5-coder-32b
     litellm_params:
-      model: ollama/llama3.2:instruct-q4_K_M
-      gpu: false
-      max_tokens: 2048
-      description: "Lightweight instruction-tuned model for general-purpose tasks."
+      model: lm_studio/qwen2.5-coder-32b
+      api_key: os.environ/LM_STUDIO_API_KEY
+      context_length: 8192
 
-  - model_name: mistral
+  - model_name: deepseek-coder-v2-lite
     litellm_params:
-      model: ollama/mistral
-      gpu: true
-      max_tokens: 4096
-      description: "Mistral optimized for language tasks requiring high accuracy."
+      model: lm_studio/deepseek-coder-v2-lite
+      api_key: os.environ/LM_STUDIO_API_KEY
+      context_length: 16384
 
-  - model_name: mistral-nemo
+  - model_name: qwen2.5-coder-7b
     litellm_params:
-      model: ollama/mistral-nemo
-      gpu: true
-      max_tokens: 8192
-      description: "Mistral optimized for language tasks requiring high accuracy."
+      model: lm_studio/qwen2.5-coder-7b
+      api_key: os.environ/LM_STUDIO_API_KEY
+      context_length: 16384
 
-  - model_name: nemotron-mini
+  - model_name: llama-3.2-3b
     litellm_params:
-      model: ollama/nemotron-mini
-      gpu: true
-      max_tokens: 2048
-    description: "Compact model for small-scale or edge-based applications."
+      model: lm_studio/llama-3.2-3b
+      api_key: os.environ/LM_STUDIO_API_KEY
+      context_length: 32768
 
-  - model_name: qwen2.5-coder-latest
+  - model_name: llama-3.1-8b-lexi
     litellm_params:
-      model: ollama/qwen2.5-coder:latest
-      gpu: true
-      max_tokens: 4096
-      description: "General-purpose coding assistant."
+      model: lm_studio/llama-3.1-8b-lexi
+      api_key: os.environ/LM_STUDIO_API_KEY
+      context_length: 16384
 
-  - model_name: ollama/codegemma
+  - model_name: dolphin-2.9.4-llama3.1-8b
     litellm_params:
-      model: ollama/codegemma
-      gpu: true
-      max_tokens: 4096
-      description: "Specialized model for code-related tasks."
+      model: lm_studio/dolphin-2.9.4-llama3.1-8b
+      api_key: os.environ/LM_STUDIO_API_KEY
+      context_length: 16384
 
-  - model_name: deepseek-coder
+  - model_name: llama-3.2-1b
     litellm_params:
-      model: ollama/deepseek-coder
-      gpu: false
-      max_tokens: 1024
-      description: "Lightweight model for searching and generating small code snippets."
+      model: lm_studio/llama-3.2-1b
+      api_key: os.environ/LM_STUDIO_API_KEY
+      context_length: 32768
 
-  - model_name: llama3.2
-    litellm_params:
-      model: ollama/llama3.2
-      gpu: true
-      max_tokens: 2048
-      description: "Standard LLaMA model for general-purpose LLM tasks."
-
-  - model_name: qwen2.5-coder-14b-studio
-    litellm_params:
-      model: lm_studio/qwen2.5-coder:14b
-      gpu: true
-      max_tokens: 8192
-      description: "Studio model for advanced language tasks."
-
+  # Ollama Models
   - model_name: mxbai-embed-large
     litellm_params:
       model: ollama/mxbai-embed-large
+      api_base: "http://host.docker.internal:11434"
+      gpu: true
+    model_info:
       mode: embedding
 
-
-default:
-  model: qwen2.5-coder:latest
-  max_tokens: 4096
-  gpu: true
-
-orchestration:
-  max_concurrent_requests: 8
-  timeout: 180
-  resource_allocation:
-    gpu_allocation_strategy: "gpu_max"
-    cpu_allocation_strategy: "fair"
-    memory_reservation: "20GB"
-  logging:
-    level: info
-    output: logs/litellm.log
-    rotation: daily
-    max_size: "100MB"
-
 litellm_settings:
-  drop_params: True
-  num_retries: 5
-  request_timeout: 600
-  telemetry: True
-  health_check_interval: 60
+  success_callbacks: ["langfuse"]
+  failure_callbacks: ["langfuse"]
+  langfuse:
+    public_key: ${LANGFUSE_PUBLIC_KEY}
+    secret_key: ${LANGFUSE_SECRET_KEY}
+    host: ${LANGFUSE_HOST}
+  langfuse_default_tags: ["cache_hit", "cache_key", "proxy_base_url", "user_api_key_alias", "user_api_key_user_id", "user_api_key_user_email", "user_api_key_team_alias", "semantic-similarity", "proxy_base_url"]
+  request_timeout: 60
+  json_logs: True
+
+cache: true
+cache_params:
+  type: redis
 
 general_settings:
-  master_key: ${LITELLM_MASTER_KEY}
+  master_key: os.environ/LITELLM_MASTER_KEY
+  salt_key: os.environ/LITELLM_SALT_KEY
+  # Proxy configurations
+  completion_model: gpt-4o-mini
+  embedding_model: mxbai-embed-large
+  background_health_checks: false
+  health_check_interval: 300
+  max_parallel_requests: 0  # the max parallel requests allowed per deployment 
+  global_max_parallel_requests: 0  # the max parallel requests allowed on the proxy all up
+  health_check_excluded_models: ["lm_studio/*"]  # Exclude all LM Studio models from health checks

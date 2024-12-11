@@ -2,45 +2,38 @@ version: "3.11"
 services:
   litellm:
     container_name: litellm
-    build:
-      context: .
-      args:
-        target: runtime
     image: ghcr.io/berriai/litellm:main-stable
-    #########################################
-    ## Uncomment these lines to start proxy with a config.yaml file ##
     volumes:
      - ./config.yaml:/app/config.yaml
     command:
      - "--config=/app/config.yaml"
-    ##############################################
     ports:
-      - "0.0.0.0:4010:4000" # Changed host port to 8001, container port remains 4000
+      - "0.0.0.0:4010:4000"
     environment:
         DATABASE_URL: ${LITELLM_DATABASE_URL}
-        STORE_MODEL_IN_DB: "True" # allows adding models to proxy via UI
+        STORE_MODEL_IN_DB: "True"
+        LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+        LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+        LANGFUSE_HOST: https://fuse.sidepiece.rip
     env_file:
-      - .env # Load local .env file
+      - .env
     restart: always
     networks:
       - secret-lab
-
-  # db:
-  #   container_name: litellm-db
-  #   image: postgres:15-alpine    # Using a specific version
-  #   restart: always
-  #   environment:
-  #     POSTGRES_DB: litellm
-  #     POSTGRES_USER: llmproxy
-  #     POSTGRES_PASSWORD: dbpassword9090
-  #     POSTGRES_HOST_AUTH_METHOD: trust    # For easier debugging
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -d litellm -U llmproxy"]
-  #     interval: 5s    # More frequent checks
-  #     timeout: 5s
-  #     retries: 5
-  #   volumes:
-  #     - postgres_data:/var/lib/postgresql/data
+      - litellm
+  db:
+    container_name: litellm-db
+    image: postgres:15-alpine    # Using a specific version
+    restart: always
+    networks:
+      - litellm
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: llmproxy
+      POSTGRES_PASSWORD: dbpassword9090
+      POSTGRES_HOST_AUTH_METHOD: trust 
+    expose:
+      - 5432
 
   prometheus:
     image: prom/prometheus
@@ -57,15 +50,14 @@ services:
     restart: always
     networks:
       - secret-lab
+      - litellm
 
 volumes:
-  postgres_data:
-    driver: local
   prometheus_data:
     driver: local
 
 networks:
+  litellm:
+    driver: bridge
   secret-lab:
     external: true
-
-# ...rest of your docker-compose config if any
