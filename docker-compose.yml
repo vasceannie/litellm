@@ -9,7 +9,7 @@ services:
     #########################################
     ## Uncomment these lines to start proxy with a config.yaml file ##
     volumes:
-     - ./config.yaml:/app/config.yaml
+     - /srv/repos/litellm/config.yaml:/app/config.yaml
     command:
      - "--config=/app/config.yaml"
     ##############################################
@@ -44,7 +44,7 @@ services:
     image: prom/prometheus
     volumes:
       - prometheus_data:/prometheus
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - /srv/repos/litellm/prometheus.yml:/etc/prometheus/prometheus.yml
     ports:
       - "9090:9090"
     command:
