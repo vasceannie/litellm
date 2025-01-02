@@ -1,33 +1,33 @@
-model_list:
-  - model_name: "*"
-    litellm_params:
-      model: openai/*
-      api_key: os.environ/OPENAI_API_KEY
-  # provider specific wildcard routing
-  - model_name: "anthropic/*"
-    litellm_params:
-      model: "anthropic/*"
-      api_key: os.environ/ANTHROPIC_API_KEY
-  - model_name: "groq/*"
-    litellm_params:
-      model: "groq/*"
-      api_key: os.environ/GROQ_API_KEY
-  - model_name: "gemini/*"
-    litellm_params:
-      model: "gemini/*"
-      api_key: os.environ/GEMINI_API_KEY
-  - model_name: "deepseek/*"
-    litellm_params:
-      model: "deepseek/*"
-      api_key: os.environ/DEEPSEEK_API_KEY
-  - model_name: "groq/*"
-    litellm_params:
-      model: "groq/*"
-      api_key: os.environ/GROQ_API_KEY
-  - model_name: "cohere/*"
-    litellm_params:
-      model: "cohere/*"
-      api_key: os.environ/COHERE_API_KEY
+# model_list:
+#   - model_name: "*"
+#     litellm_params:
+#       model: openai/*
+#       api_key: os.environ/OPENAI_API_KEY
+#   # provider specific wildcard routing
+#   - model_name: "anthropic/*"
+#     litellm_params:
+#       model: "anthropic/*"
+#       api_key: os.environ/ANTHROPIC_API_KEY
+#   - model_name: "groq/*"
+#     litellm_params:
+#       model: "groq/*"
+#       api_key: os.environ/GROQ_API_KEY
+#   - model_name: "gemini/*"
+#     litellm_params:
+#       model: "gemini/*"
+#       api_key: os.environ/GEMINI_API_KEY
+#   - model_name: "deepseek/*"
+#     litellm_params:
+#       model: "deepseek/*"
+#       api_key: os.environ/DEEPSEEK_API_KEY
+#   - model_name: "groq/*"
+#     litellm_params:
+#       model: "groq/*"
+#       api_key: os.environ/GROQ_API_KEY
+#   - model_name: "cohere/*"
+#     litellm_params:
+#       model: "cohere/*"
+#       api_key: os.environ/COHERE_API_KEY
 litellm_settings:
   # set_verbose: True  # Uncomment this if you want to see verbose logs; not recommended in production
   drop_params: True
